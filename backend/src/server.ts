@@ -2,10 +2,12 @@
 import express from 'express'
 import multer from 'multer'
 import sharp from 'sharp'
+import { resolve } from 'node:path'
 import { GoogleGenAI, Type } from '@google/genai'
 
 const app = express()
 const port = Number(process.env.PORT ?? 8787)
+const frontendDistPath = resolve(__dirname, '../../frontend/dist')
 const allowedMimeTypes = new Set(['image/png', 'image/jpeg', 'image/webp', 'application/pdf'])
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -380,5 +382,16 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
   response.status(400).json({ error: message })
 })
 
-app.listen(port, () => console.log(`Extraction server listening on http://localhost:${port}`))
+app.use(express.static(frontendDistPath))
+app.get('/{*path}', (request, response, next) => {
+  if (request.path.startsWith('/api/')) {
+    next()
+    return
+  }
+  response.sendFile(resolve(frontendDistPath, 'index.html'), (error) => {
+    if (error) next(error)
+  })
+})
+
+app.listen(port, '0.0.0.0', () => console.log(`Extraction server listening on port ${port}`))
 

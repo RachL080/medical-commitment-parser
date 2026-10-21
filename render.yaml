@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: medical-commitment-parser
+    runtime: node
+    plan: free
+    region: frankfurt
+    branch: main
+    buildCommand: npm ci --prefix backend && npm ci --prefix frontend && npm --prefix backend run build && npm --prefix frontend run build
+    startCommand: npm --prefix backend start
+    healthCheckPath: /api/health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
