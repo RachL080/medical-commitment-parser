@@ -1,0 +1,32 @@
+# Provider capability sources checked 2026-10-18:
+# Anthropic models: https://platform.claude.com/docs/en/about-claude/models/overview
+# Anthropic vision: https://platform.claude.com/docs/en/build-with-claude/vision
+# Anthropic structured outputs: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+# Anthropic limits: https://platform.claude.com/docs/en/api/rate-limits
+# OpenAI image input: https://developers.openai.com/api/docs/guides/images-vision
+# OpenAI current model details: https://developers.openai.com/api/docs/models/gpt-5-mini
+# OpenAI rate tiers/free eligibility: https://developers.openai.com/api/docs/guides/rate-limits
+# Gemini docs were blocked by this environment's network gateway on 2026-10-18. No model ID/free quota is asserted; verify current account availability:
+# https://ai.google.dev/gemini-api/docs/models
+# https://ai.google.dev/gemini-api/docs/structured-output
+# https://ai.google.dev/gemini-api/docs/rate-limits
+
+provider: gemini
+model: ${GEMINI_MODEL}
+temperature: 0
+max_retries: 3
+requests_per_minute: 10
+fallback_provider: null
+fallback_model: null
+allow_external_api: false
+max_image_edge_px: 2000
+cache_dir: .cache/model-layer
+cache_enabled: true
+prompt_version: "1"
+schema_version: "1"
+provider_models:
+  gemini: ${GEMINI_MODEL}
+  anthropic: ${ANTHROPIC_MODEL}
+  openai: ${OPENAI_MODEL}
+  local: ${LOCAL_MODEL}
+allowed_referring_organizations: []

@@ -1,0 +1,31 @@
+# Local secrets
+**/.env
+**/.env.*
+!**/.env.example
+
+# Dependencies and generated files
+**/node_modules/
+.venv/
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+.cache/
+.pytest_cache/
+.vite/
+**/dist/
+**/build/
+
+# Local databases and logs
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Medical sample documents stored at the project root
+/*.pdf
+/*.png
+/*.jpg
+/*.jpeg
+/*.tif
+/*.tiff
