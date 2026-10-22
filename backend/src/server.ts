@@ -234,8 +234,8 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
       }))
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
     const configuredModel = process.env.GEMINI_MODEL?.trim()
-    const primaryModel = configuredModel || 'gemini-2.5-flash'
-    const fallbackModel = 'gemini-2.5-flash'
+    const primaryModel = configuredModel || 'gemini-3.8-flash'
+    const fallbackModel = 'gemini-3.8-flash'
     const generateExtraction = (model: string) => ai.models.generateContent({
       model,
       contents: [{
@@ -382,7 +382,7 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
     if (isModelUnavailableError(error)) {
       const configuredModel = process.env.GEMINI_MODEL?.trim() || 'gemini-2.5-flash'
       console.error('Gemini model unavailable:', status, configuredModel, safeDiagnostic.slice(0, 1200))
-      response.status(502).json({ error: 'מודל Gemini שנבחר אינו זמין בפרויקט. בדקי את GEMINI_MODEL במשתני הסביבה של השרת (לדוגמה Render) והגדירי gemini-2.5-flash.' })
+      response.status(502).json({ error: 'מודל Gemini שנבחר אינו זמין בפרויקט. בדקי את GEMINI_MODEL במשתני הסביבה של השרת (לדוגמה Render) והגדירי gemini-3.8-flash.' })
       return
     }
     if (status === 429) {
