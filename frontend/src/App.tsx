@@ -5,6 +5,7 @@ import type { ChangeEvent } from 'react'
 import type { ExtractedForm } from './types'
 import {
   clearAll,
+  calculateFileHash,
   completeExtraction,
   createBatch,
   createPendingExtraction,
@@ -53,8 +54,13 @@ interface QueuedPageTask {
   file: File
   fileName: string
   pageNumber: number
-  blob: Blob
+  renderPage: () => Promise<Blob>
   previewUrl: string
+}
+
+interface UploadPageRenderer {
+  pageCount: number
+  renderPage: (pageNumber: number) => Promise<Blob>
 }
 
 const CUSTOM_ORGANIZATION = '__custom_organization__'
@@ -173,15 +179,16 @@ function toReviewForm(record: FormRecord, isProcessing: boolean, isQueued: boole
   }
 }
 
-async function renderUploadPages(file: File) {
-  if (file.type !== 'application/pdf') return [{ pageNumber: 1, blob: file }]
+async function createUploadPageRenderer(file: File): Promise<UploadPageRenderer> {
+  if (file.type !== 'application/pdf') return { pageCount: 1, renderPage: async () => file }
   const { GlobalWorkerOptions, getDocument } = await import('pdfjs-dist')
   GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString()
   const pdf = await getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise
-  const pages: Array<{ pageNumber: number; blob: Blob }> = []
-  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+  return {
+    pageCount: pdf.numPages,
+    renderPage: async (pageNumber) => {
     const page = await pdf.getPage(pageNumber)
-    const viewport = page.getViewport({ scale: 2 })
+    const viewport = page.getViewport({ scale: 1.5 })
     const canvas = document.createElement('canvas')
     canvas.width = viewport.width
     canvas.height = viewport.height
@@ -189,13 +196,13 @@ async function renderUploadPages(file: File) {
     if (!context) throw new Error('לא ניתן לעבד את עמוד ה־PDF בדפדפן')
     await page.render({ canvas, canvasContext: context, viewport }).promise
     const blob = await new Promise<Blob>((resolve, reject) => {
-      canvas.toBlob((result) => result ? resolve(result) : reject(new Error('לא ניתן להכין את עמוד ה־PDF לחילוץ')), 'image/png')
+      canvas.toBlob((result) => result ? resolve(result) : reject(new Error('לא ניתן להכין את עמוד ה־PDF לחילוץ')), 'image/jpeg', 0.84)
     })
-    pages.push({ pageNumber, blob })
     canvas.width = 0
     canvas.height = 0
+    return blob
+    },
   }
-  return pages
 }
 
 function wait(milliseconds: number) {
@@ -211,11 +218,12 @@ interface ExtractionApiResponse extends Partial<ExtractedForm> {
 async function extractPendingPage(task: QueuedPageTask, onRetry: (delaySeconds: number, attempt: number) => void) {
   try {
     await markExtractionPending(task.formId)
+    const pageBlob = await task.renderPage()
     let result: ExtractionApiResponse | undefined
     let response: Response | undefined
     for (let attempt = 0; attempt <= 3; attempt += 1) {
       const requestData = new FormData()
-      requestData.append('file', task.blob, `${task.fileName}.page-${task.pageNumber}.png`)
+      requestData.append('file', pageBlob, `${task.fileName}.page-${task.pageNumber}.jpg`)
       response = await fetch('/api/extract', { method: 'POST', body: requestData, signal: AbortSignal.timeout(120_000) })
       const contentType = response.headers.get('content-type') ?? ''
       if (!contentType.includes('application/json')) {
@@ -539,20 +547,21 @@ function App() {
     for (const file of acceptedFiles) {
       const previewUrl = URL.createObjectURL(file)
       objectUrlsRef.current.push(previewUrl)
-      let pages: Array<{ pageNumber: number; blob: Blob }>
+      let pageRenderer: UploadPageRenderer
+      let fileHash: string
       try {
-        pages = await renderUploadPages(file)
+        ;[pageRenderer, fileHash] = await Promise.all([createUploadPageRenderer(file), calculateFileHash(file)])
       } catch (error) {
-        setNotice(`לא ניתן לפצל את ${file.name}: ${error instanceof Error ? error.message : 'שגיאת PDF'}`)
+        setNotice(`לא ניתן להכין את ${file.name}: ${error instanceof Error ? error.message : 'שגיאת קובץ'}`)
         URL.revokeObjectURL(previewUrl)
         objectUrlsRef.current = objectUrlsRef.current.filter((url) => url !== previewUrl)
         continue
       }
 
-      for (const page of pages) {
+      for (let pageNumber = 1; pageNumber <= pageRenderer.pageCount; pageNumber += 1) {
         let pendingId: number | undefined
         try {
-          const pending = await createPendingExtraction(batchId, file, file.name, page.pageNumber)
+          const pending = await createPendingExtraction(batchId, file, file.name, pageNumber, fileHash)
           pendingId = pending.id
           if (pending.created) {
             createdRecordCount += 1
@@ -566,7 +575,7 @@ function App() {
           setActiveFormId((currentId) => currentId ?? pending.id)
 
           if (!pending.created && pending.form.extractionStatus === 'complete') continue
-          tasks.push({ formId: pending.id, batchId: pending.form.batchId, file, fileName: file.name, pageNumber: page.pageNumber, blob: page.blob, previewUrl })
+          tasks.push({ formId: pending.id, batchId: pending.form.batchId, file, fileName: file.name, pageNumber, renderPage: () => pageRenderer.renderPage(pageNumber), previewUrl })
         } catch (error) {
           const message = error instanceof DOMException && error.name === 'TimeoutError'
             ? 'החילוץ נמשך זמן רב מדי. אפשר להעלות שוב כדי לחדש.'
@@ -576,7 +585,7 @@ function App() {
             setFileArtifacts((current) => ({ ...current, [pendingId!]: { file, previewUrl } }))
             firstSelectedId ??= pendingId
           }
-          setNotice(`לא ניתן להכין את ${file.name}, עמוד ${page.pageNumber}: ${message}.`)
+          setNotice(`לא ניתן להכין את ${file.name}, עמוד ${pageNumber}: ${message}.`)
         }
       }
     }

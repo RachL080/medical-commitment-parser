@@ -220,8 +220,9 @@ export async function createPendingExtraction(
   file: Blob,
   fileName: string,
   pageNumber: number,
+  knownFileHash?: string,
 ) {
-  const fileHash = await calculateFileHash(file)
+  const fileHash = knownFileHash ?? await calculateFileHash(file)
   const existing = await db.forms.where('[fileHash+pageNumber]').equals([fileHash, pageNumber]).first()
   if (existing) return { id: existing.id!, form: existing, created: false }
 
