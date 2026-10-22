@@ -221,7 +221,7 @@ async function extractPendingPage(task: QueuedPageTask, onRetry: (delaySeconds: 
     const pageBlob = await task.renderPage()
     let result: ExtractionApiResponse | undefined
     let response: Response | undefined
-    for (let attempt = 0; attempt <= 3; attempt += 1) {
+    for (let attempt = 0; attempt <= 1; attempt += 1) {
       const requestData = new FormData()
       requestData.append('file', pageBlob, `${task.fileName}.page-${task.pageNumber}.jpg`)
       response = await fetch('/api/extract', { method: 'POST', body: requestData, signal: AbortSignal.timeout(120_000) })
@@ -230,8 +230,8 @@ async function extractPendingPage(task: QueuedPageTask, onRetry: (delaySeconds: 
         throw new Error(`שרת Render החזיר דף שגיאה במקום נתוני חילוץ (HTTP ${response.status}). ייתכן שהשרת התעורר או שהבקשה נקטעה. נסי שוב; אם זה חוזר, בדקי את Render Logs.`)
       }
       result = await response.json() as ExtractionApiResponse
-      if ((response.status !== 429 && response.status !== 503) || attempt === 3) break
-      const delaySeconds = 2 ** attempt
+      if ((response.status !== 429 && response.status !== 503) || attempt === 1) break
+      const delaySeconds = 1
       onRetry(delaySeconds, attempt + 1)
       await wait(delaySeconds * 1000)
     }
