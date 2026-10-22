@@ -12,11 +12,12 @@ import {
   failExtraction,
   listBatches,
   listForms,
+  markFieldReviewed,
   requestPersistentStorage,
   markExtractionPending,
   verifyForm,
 } from './db'
-import type { ExtractionFlag, FormCorrections, FormRecord, FormStatus } from './db'
+import type { ExtractionFlag, FieldFlag, FormCorrections, FormFieldName, FormRecord, FormStatus } from './db'
 import './App.css'
 import './sheba-theme.css'
 
@@ -401,7 +402,8 @@ function App() {
   }
 
   const missingFieldKeys = formFieldKeys.filter((key) => isEmptyFieldValue(form?.[key]))
-  const hasUnresolvedFields = formFieldKeys.some((key) => isEmptyFieldValue(form?.[key]) || activeForm?.uncertainFields.includes(key))
+  const hasUnresolvedFields = formFieldKeys.some((key) => isEmptyFieldValue(form?.[key])
+    || (activeForm?.uncertainFields.includes(key) && !activeForm.reviewedFields.includes(key)))
   const reviewFieldKeys = formFieldKeys.filter((key) => needsReview(key) || missingFieldKeys.includes(key))
   const fieldsToReview = reviewFieldKeys.length
 
@@ -602,7 +604,8 @@ function App() {
   async function verifyAndContinue() {
     if (!activeForm) return
     if (activeForm?.ocrStatus === 'processing') return
-    const unresolvedFields = formFieldKeys.filter((key) => isEmptyFieldValue(activeForm?.data[key]) || activeForm?.uncertainFields.includes(key))
+    const unresolvedFields = formFieldKeys.filter((key) => isEmptyFieldValue(activeForm?.data[key])
+      || (activeForm?.uncertainFields.includes(key) && !activeForm.reviewedFields.includes(key)))
     if (unresolvedFields.length > 0) {
       setNotice('יש להשלים את כל השדות לפני אישור הטופס.')
       return
@@ -694,9 +697,24 @@ function App() {
 
   function fieldStatus(key: FieldKey) {
     if (missingFieldKeys.includes(key)) return 'missing'
-    if (activeForm?.confirmedFields.includes(key)) return 'confirmed'
+    if (activeForm?.confirmedFields.includes(key) || activeForm?.reviewedFields.includes(key)) return 'confirmed'
     if (activeForm?.uncertainFields.includes(key) && !activeForm.reviewedFields.includes(key)) return 'uncertain'
     return 'verified'
+  }
+
+  async function confirmFieldAgainstDocument(key: FieldKey) {
+    if (!activeForm || typeof activeForm.id !== 'number') return
+    const value = activeForm.data[key]
+    if (isEmptyFieldValue(value)) return
+    const fieldName = (key === 'sampleReceivedDate'
+      ? 'receivedDate'
+      : key === 'referringOrganization' ? 'sender' : key) as FormFieldName
+    try {
+      await markFieldReviewed(activeForm.id, fieldName, value as FieldFlag['correctedValue'])
+      setNotice(`${fieldMeta[key].label} אושר מול הטופס.`)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'לא ניתן לשמור את אישור השדה.')
+    }
   }
 
   function renderField(key: FieldKey) {
@@ -717,7 +735,7 @@ function App() {
           <span className={`confidence-dot confidence-${status}`} title={title} aria-label={title} />
           {status === 'uncertain' && <span className="field-warning">נדרשת התאמה</span>}
           {status === 'missing' && <span className="field-warning">להשלמה ידנית</span>}
-          {status === 'confirmed' && <span className="field-confirmed">✓ נבדק</span>}
+          {status === 'confirmed' && <span className="field-confirmed">✓ נבדק מול הטופס</span>}
           {status === 'verified' && <span className="field-verified">✓ זוהה</span>}
           {key === 'referringOrganization' && activeForm?.organizationEvidence && <small className="organization-evidence">{activeForm.organizationEvidence === 'logo' ? 'לוגו בלבד' : activeForm.organizationEvidence === 'both' ? 'טקסט ולוגו' : activeForm.organizationEvidence === 'text' ? 'טקסט במסמך' : activeForm.organizationEvidence === 'uncertain' ? 'לא אומת מול רשימת הארגונים' : 'לא זוהה טקסט ארגון'}{activeForm.organizationObservedText ? ` · נקרא: ${activeForm.organizationObservedText}` : ''}</small>}
           {(key === 'centralNumbers' || key === 'commitmentNumbers') && <small>ניתן להפריד בפסיק</small>}
@@ -783,6 +801,13 @@ function App() {
           title={status === 'uncertain' ? title : undefined}
           aria-invalid={status === 'uncertain' || status === 'missing'}
         />}
+        {status === 'uncertain' && !isEmptyFieldValue(value) && <button
+          className="field-review-button"
+          type="button"
+          onClick={() => void confirmFieldAgainstDocument(key)}
+          aria-label={`אישור ${label} מול הטופס`}
+          title="סימני שבדקת את הערך מול המסמך"
+        >✓ אימתתי מול הטופס</button>}
         {(status === 'uncertain' || status === 'missing') && <span className="field-reason"><span aria-hidden="true">!</span>{status === 'missing' ? 'לא נמצא במסמך — השלימי ידנית אם ידוע' : title}</span>}
       </div>
     )

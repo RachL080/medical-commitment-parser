@@ -260,6 +260,37 @@ export async function markExtractionPending(formId: number) {
   await db.forms.update(formId, { extractionStatus: 'pending', extractionError: null })
 }
 
+export async function markFieldReviewed(
+  formId: number,
+  fieldName: FormFieldName,
+  value: FieldFlag['correctedValue'],
+) {
+  if (value == null || (typeof value === 'string' && value.trim() === '') || (Array.isArray(value) && value.length === 0)) {
+    throw new Error('יש להזין ערך לפני אישור מול הטופס.')
+  }
+  return db.transaction('rw', db.forms, async () => {
+    const form = await db.forms.get(formId)
+    if (!form) throw new Error(`Form ${formId} was not found`)
+    const existingFlag = form.flags.find((flag) => flag.fieldName === fieldName)
+    if (existingFlag) {
+      existingFlag.correctedValue = value
+    } else {
+      form.flags.push({
+        fieldName,
+        reason: 'אומת ידנית מול הטופס',
+        originalValue: (form[fieldName as keyof FormRecord] as FieldFlag['originalValue']) ?? null,
+        correctedValue: value,
+      })
+    }
+    Object.assign(form, { [fieldName]: value })
+    if (form.status === 'needs_review' && form.flags.every((flag) => flag.correctedValue !== null)) {
+      form.status = 'pending'
+    }
+    await db.forms.put(form)
+    return form
+  })
+}
+
 export async function completeExtraction(formId: number, data: ExtractionData, flags: ExtractionFlag[] = []) {
   return db.transaction('rw', db.forms, async () => {
     const form = await db.forms.get(formId)

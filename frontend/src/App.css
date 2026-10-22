@@ -78,6 +78,9 @@
 .field-missing { color: #986515; background: #fff1d1; }
 .field-confirmed { color: var(--mint); background: #dcf1e6; }
 .field-verified { padding: 3px 6px; color: #3b8065; background: #eaf6ef; border-radius: 5px; font-size: 8px; font-weight: 700; }
+.field-review-button { align-self: flex-start; min-height: 30px; padding: 4px 9px; color: #236c51; background: #edf7f1; border: 1px solid #c8e2d2; border-radius: 5px; font: inherit; font-size: 10px; font-weight: 650; cursor: pointer; }
+.field-review-button:hover { background: #e1f1e8; border-color: #9fcbb0; }
+.field-review-button:focus-visible { outline: 2px solid #277b67; outline-offset: 2px; }
 .field-reason { display: flex; align-items: center; gap: 5px; color: #8b651f; font-size: 9px; line-height: 1.35; }
 .field-reason > span { width: 13px; height: 13px; display: grid; place-items: center; color: #996813; background: #fae8c2; border-radius: 50%; font-size: 8px; font-weight: 800; }
 .field-input { width: 100%; min-width: 0; height: 43px; padding: 0 12px; color: var(--ink); background: #fff; border: 1px solid #ddd9e4; border-radius: 6px; font: inherit; font-size: 13px; font-weight: 500; outline: none; transition: border-color 180ms, background 200ms, box-shadow 180ms; }
