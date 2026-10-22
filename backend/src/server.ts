@@ -120,6 +120,24 @@ function hasDateEvidence(value: string, evidence: string) {
   return dates.some((date) => parseIsraeliDate(date) === expected)
 }
 
+function getGeminiErrorStatus(error: unknown) {
+  return typeof error === 'object' && error !== null && 'status' in error
+    ? Number(error.status)
+    : 0
+}
+
+function getGeminiErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : 'Unknown Gemini error'
+}
+
+function isModelUnavailableError(error: unknown) {
+  const status = getGeminiErrorStatus(error)
+  if (status === 404 || status === 503) return true
+  if (status !== 400) return false
+  const message = getGeminiErrorMessage(error).toLowerCase()
+  return /model|unsupported|unavailable|not\s+found|not\s+supported|unknown/u.test(message)
+}
+
 const responseSchema = {
   type: Type.OBJECT,
   properties: {
@@ -198,7 +216,7 @@ app.get('/api/models', async (_request, response) => {
 
 app.post('/api/extract', upload.single('file'), async (request, response) => {
   if (!process.env.GEMINI_API_KEY) {
-    response.status(503).json({ error: 'Missing Gemini API key in backend/.env.' })
+    response.status(503).json({ error: 'Missing Gemini API key. Set GEMINI_API_KEY in your backend environment variables.' })
     return
   }
   const uploadedFile = request.file
@@ -215,9 +233,11 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
         return { degrees, inlineData: { mimeType: 'image/png', data: rotated.toString('base64') } }
       }))
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
-      const primaryModel = process.env.GEMINI_MODEL ?? 'gemini-3.8-flash'
-      const generateExtraction = (model: string) => ai.models.generateContent({
-        model,
+    const configuredModel = process.env.GEMINI_MODEL?.trim()
+    const primaryModel = configuredModel || 'gemini-2.5-flash'
+    const fallbackModel = 'gemini-2.5-flash'
+    const generateExtraction = (model: string) => ai.models.generateContent({
+      model,
       contents: [{
         role: 'user',
         parts: candidates.flatMap((candidate) => [
@@ -247,11 +267,8 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
       },
     })
     const result = await generateExtraction(primaryModel).catch(async (error: unknown) => {
-      const status = typeof error === 'object' && error !== null && 'status' in error
-        ? Number(error.status)
-        : 0
-      if ((status !== 503 && status !== 404) || primaryModel === 'gemini-2.5-flash') throw error
-      return generateExtraction('gemini-2.5-flash')
+      if (!isModelUnavailableError(error) || primaryModel === fallbackModel) throw error
+      return generateExtraction(fallbackModel)
     })
 
     if (!result.text) {
@@ -349,23 +366,21 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
 
     response.json(extracted)
   } catch (error) {
-    const status = typeof error === 'object' && error !== null && 'status' in error
-      ? Number(error.status)
-      : 0
-    const diagnostic = error instanceof Error ? error.message : 'Unknown Gemini error'
+    const status = getGeminiErrorStatus(error)
+    const diagnostic = getGeminiErrorMessage(error)
     const safeDiagnostic = process.env.GEMINI_API_KEY
       ? diagnostic.replaceAll(process.env.GEMINI_API_KEY, '[REDACTED]')
       : diagnostic
     if (status === 401) {
-      response.status(502).json({ error: 'Gemini דחה את המפתח. ודאי שזה API key פעיל מ־Google AI Studio ולא OAuth token, עדכני את backend/.env והפעילי מחדש את השרת.' })
+      response.status(502).json({ error: 'Gemini דחה את המפתח. ודאי שזה API key פעיל מ־Google AI Studio ולא OAuth token, עדכני את משתני הסביבה של השרת והפעילי מחדש.' })
       return
     }
     if (status === 403) {
       response.status(502).json({ error: 'למפתח אין הרשאה לשירות Gemini או למודל שנבחר. בדקי הרשאות ו־billing בפרויקט Google.' })
       return
     }
-    if (status === 404) {
-      response.status(502).json({ error: 'מודל Gemini שנבחר אינו זמין בפרויקט. בדקי את GEMINI_MODEL ב־backend/.env.' })
+    if (isModelUnavailableError(error)) {
+      response.status(502).json({ error: 'מודל Gemini שנבחר אינו זמין בפרויקט. בדקי את GEMINI_MODEL במשתני הסביבה של השרת (לדוגמה Render) והגדירי gemini-2.5-flash.' })
       return
     }
     if (status === 429) {
