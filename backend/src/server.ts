@@ -132,7 +132,7 @@ function getGeminiErrorMessage(error: unknown) {
 
 function isModelUnavailableError(error: unknown) {
   const status = getGeminiErrorStatus(error)
-  if (status === 404 || status === 503) return true
+  if (status === 404) return true
   if (status !== 400) return false
   const message = getGeminiErrorMessage(error).toLowerCase()
   return /model|unsupported|unavailable|not\s+found|not\s+supported|unknown/u.test(message)
@@ -148,10 +148,12 @@ function extractionScore(result: Record<string, unknown>) {
 }
 
 function needsOrientationRetry(result: Record<string, unknown>) {
+  const orientation = Number(result.orientationDegrees)
+  if ([90, 180, 270].includes(orientation)) return true
   const requiredValues = ['firstName', 'lastName', 'idNumber', 'sampleReceivedDate']
   const missingRequired = requiredValues.filter((field) => typeof result[field] !== 'string' || result[field].trim().length === 0).length
   const uncertainCount = Array.isArray(result.uncertainFields) ? result.uncertainFields.length : requiredValues.length
-  return missingRequired >= 2 || uncertainCount >= 4
+  return missingRequired >= 3 && uncertainCount >= 4
 }
 
 const responseSchema = {
@@ -256,7 +258,7 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
     const configuredModel = process.env.GEMINI_MODEL?.trim()
     const primaryModel = configuredModel || 'gemini-3.8-flash'
-    const fallbackModel = 'gemini-3.8-flash'
+    const fallbackModel = 'gemini-3.7-flash'
     const generateExtraction = (model: string, imageCandidates: typeof candidates = candidates) => ai.models.generateContent({
       model,
       contents: [{
@@ -291,7 +293,7 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
       try {
         return await generateExtraction(primaryModel, imageCandidates)
       } catch (error) {
-        if (!isModelUnavailableError(error) || primaryModel === fallbackModel) throw error
+        if ((!isModelUnavailableError(error) && getGeminiErrorStatus(error) !== 503) || primaryModel === fallbackModel) throw error
         return generateExtraction(fallbackModel, imageCandidates)
       }
     }
@@ -323,7 +325,9 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
     }
     if (uploadedFile.mimetype !== 'application/pdf' && needsOrientationRetry(extracted)) {
       try {
-        const rotatedCandidates = await createImageCandidates([0, 90, 180, 270])
+        const detectedOrientation = Number(extracted.orientationDegrees)
+        const orientations = [90, 180, 270].includes(detectedOrientation) ? [detectedOrientation] : [90, 180, 270]
+        const rotatedCandidates = await createImageCandidates(orientations)
         const rotatedResult = await runExtraction(rotatedCandidates)
         if (rotatedResult.text) {
           const rotatedExtraction = JSON.parse(rotatedResult.text) as typeof extracted
