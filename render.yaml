@@ -11,3 +11,9 @@ services:
     envVars:
       - key: GEMINI_API_KEY
         sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+      - key: GEMINI_REQUEST_TIMEOUT_MS
+        value: "25000"
+      - key: GEMINI_ORIENTATION_TIMEOUT_MS
+        value: "15000"

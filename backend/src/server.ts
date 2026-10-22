@@ -130,6 +130,29 @@ function getGeminiErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : 'Unknown Gemini error'
 }
 
+function createStatusError(status: number, message: string) {
+  return Object.assign(new Error(message), { status })
+}
+
+function parsePositiveInt(value: string | undefined, fallback: number) {
+  if (!value) return fallback
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  const timeoutPromise = new Promise<T>((_resolve, reject) => {
+    timeoutId = setTimeout(() => reject(createStatusError(504, timeoutMessage)), timeoutMs)
+  })
+  try {
+    return await Promise.race([promise, timeoutPromise])
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId)
+  }
+}
+
 function isModelUnavailableError(error: unknown) {
   const status = getGeminiErrorStatus(error)
   if (status === 404) return true
@@ -234,8 +257,8 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
     const createImageCandidates = (degreesToTry: number[]) => Promise.all(degreesToTry.map(async (degrees) => {
       const rotated = await sharp(uploadedFile.buffer, { failOn: 'none' })
         .rotate(degrees)
-        .resize({ width: 1800, height: 1800, fit: 'inside', withoutEnlargement: true })
-        .jpeg({ quality: 82 })
+        .resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true })
+        .jpeg({ quality: 78 })
         .toBuffer()
       return { degrees, inlineData: { mimeType: 'image/jpeg', data: rotated.toString('base64') } }
     }))
@@ -243,46 +266,73 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
       ? [{ degrees: 0, inlineData: { mimeType: uploadedFile.mimetype, data: uploadedFile.buffer.toString('base64') } }]
       : await createImageCandidates([0])
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
+    const requestTimeoutMs = parsePositiveInt(process.env.GEMINI_REQUEST_TIMEOUT_MS, 25_000)
+    const orientationRetryTimeoutMs = parsePositiveInt(
+      process.env.GEMINI_ORIENTATION_TIMEOUT_MS,
+      Math.max(12_000, Math.floor(requestTimeoutMs * 0.6)),
+    )
     const configuredModel = process.env.GEMINI_MODEL?.trim()
-    const primaryModel = configuredModel || 'gemini-3.8-flash'
-    const fallbackModel = 'gemini-3.7-flash'
-    const generateExtraction = (model: string, imageCandidates: typeof candidates = candidates) => ai.models.generateContent({
-      model,
-      contents: [{
-        role: 'user',
-        parts: imageCandidates.flatMap((candidate) => [
-          ...(imageCandidates.length > 1 ? [{ text: `Candidate orientation ${candidate.degrees} degrees clockwise.` }] : []),
-          { inlineData: candidate.inlineData },
-        ]).concat([{
-          text: [
-            'Extract the form fields from the document image and return only the required JSON schema.',
-            'CRITICAL NAME RULE: Do not invent, infer, autocomplete, or use common names. If a name is partly legible, return only the literal candidate you can read and mark that field uncertain with evidence/reason. Return null only when no candidate letters are legible.',
-            'For every non-null firstName, firstNameEvidence must quote the exact visible letters/words that support it. For every non-null lastName, lastNameEvidence must quote the exact visible letters/words that support it.',
-            'If evidence does not contain the returned name, or handwriting is not legible enough to read exact letters, return null for that name and include its field key in uncertainFields.',
-            'ID RULE: Copy the ID number exactly from a field explicitly labeled תעודת זהות or מספר זהות. Never use a commitment number, referral number, phone number, or another digit sequence. Return idNumberEvidence as the exact label and digits. If some digits are visible but uncertain, return the literal candidate and mark idNumber uncertain; return null only when no ID digits are legible.',
-            'DATE RULE: Read sampleReceivedDate only from the date stamped with התקבל or נתקבל on the form. Do not use a typed/printed form date, referral date, issue date, or today, even if another date is clearly printed. Return sampleReceivedDateEvidence containing the exact stamp wording (התקבל/נתקבל) and the stamped date. If some stamp digits are visible but uncertain, return the legible date candidate and mark sampleReceivedDate uncertain; return null only when no received-stamp date is legible.',
-            'CENTRAL NUMBERS RULE: Find and return every distinct central number (מספר מרכזי) shown on the form, including multiple numbers in the same field or repeated central-number entries. Return all of them in centralNumbers; do not return only the first. Exclude ID numbers, commitment numbers, phone numbers, and unrelated reference numbers. Mark centralNumbers uncertain if any candidate digits are ambiguous.',
-            'If there are separate first-name and family-name fields, read them independently. Only for one combined full-name field, use the last word as family name and preceding words as given name.',
-            `REFERRING ORGANIZATION LIST (choose the canonical name before parentheses): ${organizationNames.map((name) => `${name}${organizationAliases[name]?.length ? ` (brand aliases: ${organizationAliases[name].join(', ')})` : ''}`).join(' | ')}`,
-            'REFERRING ORGANIZATION RULE: Visually inspect every logo, emblem, and brand mark on the document, not only selectable/printed text. Transcribe the visible logo wording exactly into referringOrganizationLogoText. Match that wording against the provided organization list, including known short brand names/aliases, and return the exact list item as referringOrganizationCandidate. Select only one exact list item; otherwise return null. Do not choose an organization merely because its name appears elsewhere. Use labels and layout to determine which logo/name belongs to the referring organization, not the receiving lab/hospital. referringOrganizationContext must describe the position/label proving it is the sender/referrer (for example, insurer/member area or referring-clinic field). If sender versus receiver is unclear, return null and mark referringOrganization uncertain.',
-            'If a field is absent or has no legible candidate, return null. If a candidate is visible but confidence is low, return the literal candidate, include the field in uncertainFields, and explain why. Never guess characters or values.',
-            'For each field key in uncertainFields, add a fieldReasons entry with a concise, specific reason based on the image (for example, label missing, handwriting illegible, digits ambiguous, or value not present). Do not include personal values in reasons.',
-          ].join(' '),
-        }]),
-      }],
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema,
-        temperature: 0,
-      },
-    })
-    const runExtraction = async (imageCandidates: typeof candidates) => {
-      try {
-        return await generateExtraction(primaryModel, imageCandidates)
-      } catch (error) {
-        if ((!isModelUnavailableError(error) && getGeminiErrorStatus(error) !== 503) || primaryModel === fallbackModel) throw error
-        return generateExtraction(fallbackModel, imageCandidates)
+    const fallbackModel = process.env.GEMINI_FALLBACK_MODEL?.trim()
+    const modelCandidates = [...new Set([
+      configuredModel,
+      fallbackModel,
+      'gemini-3.5-flash-lite',
+      'gemini-flash-lite-latest',
+      'gemini-3.8-flash',
+      'gemini-3.7-flash',
+    ].filter((model): model is string => Boolean(model)))]
+    const generateExtraction = (model: string, imageCandidates: typeof candidates = candidates, timeoutMs = requestTimeoutMs) => withTimeout(
+      ai.models.generateContent({
+        model,
+        contents: [{
+          role: 'user',
+          parts: imageCandidates.flatMap((candidate) => [
+            ...(imageCandidates.length > 1 ? [{ text: `Candidate orientation ${candidate.degrees} degrees clockwise.` }] : []),
+            { inlineData: candidate.inlineData },
+          ]).concat([{
+            text: [
+              'Extract the form fields from the document image and return only the required JSON schema.',
+              'CRITICAL NAME RULE: Do not invent, infer, autocomplete, or use common names. If a name is partly legible, return only the literal candidate you can read and mark that field uncertain with evidence/reason. Return null only when no candidate letters are legible.',
+              'For every non-null firstName, firstNameEvidence must quote the exact visible letters/words that support it. For every non-null lastName, lastNameEvidence must quote the exact visible letters/words that support it.',
+              'If evidence does not contain the returned name, or handwriting is not legible enough to read exact letters, return null for that name and include its field key in uncertainFields.',
+              'ID RULE: Copy the ID number exactly from a field explicitly labeled תעודת זהות or מספר זהות. Never use a commitment number, referral number, phone number, or another digit sequence. Return idNumberEvidence as the exact label and digits. If some digits are visible but uncertain, return the literal candidate and mark idNumber uncertain; return null only when no ID digits are legible.',
+              'DATE RULE: Read sampleReceivedDate only from the date stamped with התקבל or נתקבל on the form. Do not use a typed/printed form date, referral date, issue date, or today, even if another date is clearly printed. Return sampleReceivedDateEvidence containing the exact stamp wording (התקבל/נתקבל) and the stamped date. If some stamp digits are visible but uncertain, return the legible date candidate and mark sampleReceivedDate uncertain; return null only when no received-stamp date is legible.',
+              'CENTRAL NUMBERS RULE: Find and return every distinct central number (מספר מרכזי) shown on the form, including multiple numbers in the same field or repeated central-number entries. Return all of them in centralNumbers; do not return only the first. Exclude ID numbers, commitment numbers, phone numbers, and unrelated reference numbers. Mark centralNumbers uncertain if any candidate digits are ambiguous.',
+              'If there are separate first-name and family-name fields, read them independently. Only for one combined full-name field, use the last word as family name and preceding words as given name.',
+              `REFERRING ORGANIZATION LIST (choose the canonical name before parentheses): ${organizationNames.map((name) => `${name}${organizationAliases[name]?.length ? ` (brand aliases: ${organizationAliases[name].join(', ')})` : ''}`).join(' | ')}`,
+              'REFERRING ORGANIZATION RULE: Visually inspect every logo, emblem, and brand mark on the document, not only selectable/printed text. Transcribe the visible logo wording exactly into referringOrganizationLogoText. Match that wording against the provided organization list, including known short brand names/aliases, and return the exact list item as referringOrganizationCandidate. Select only one exact list item; otherwise return null. Do not choose an organization merely because its name appears elsewhere. Use labels and layout to determine which logo/name belongs to the referring organization, not the receiving lab/hospital. referringOrganizationContext must describe the position/label proving it is the sender/referrer (for example, insurer/member area or referring-clinic field). If sender versus receiver is unclear, return null and mark referringOrganization uncertain.',
+              'If a field is absent or has no legible candidate, return null. If a candidate is visible but confidence is low, return the literal candidate, include the field in uncertainFields, and explain why. Never guess characters or values.',
+              'For each field key in uncertainFields, add a fieldReasons entry with a concise, specific reason based on the image (for example, label missing, handwriting illegible, digits ambiguous, or value not present). Do not include personal values in reasons.',
+            ].join(' '),
+          }]),
+        }],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema,
+          temperature: 0,
+        },
+      }),
+      timeoutMs,
+      `Gemini request timed out after ${timeoutMs}ms`,
+    )
+    const runExtraction = async (imageCandidates: typeof candidates, timeoutMs = requestTimeoutMs) => {
+      let lastError: unknown
+      for (let index = 0; index < modelCandidates.length; index += 1) {
+        const model = modelCandidates[index]
+        try {
+          return await generateExtraction(model, imageCandidates, timeoutMs)
+        } catch (error) {
+          lastError = error
+          const status = getGeminiErrorStatus(error)
+          const shouldRetryOnNextModel = isModelUnavailableError(error)
+            || status === 429
+            || status === 503
+            || status === 504
+          if (!shouldRetryOnNextModel || index === modelCandidates.length - 1) throw error
+          console.warn('Gemini primary model failed, trying fallback model:', model, status, getGeminiErrorMessage(error).slice(0, 300))
+        }
       }
+      throw lastError ?? createStatusError(502, 'Gemini extraction failed without a specific error')
     }
     let result = await runExtraction(candidates)
 
@@ -314,7 +364,7 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
       try {
         const detectedOrientation = Number(extracted.orientationDegrees)
         const rotatedCandidates = await createImageCandidates([detectedOrientation])
-        const rotatedResult = await runExtraction(rotatedCandidates)
+        const rotatedResult = await runExtraction(rotatedCandidates, orientationRetryTimeoutMs)
         if (rotatedResult.text) {
           const rotatedExtraction = JSON.parse(rotatedResult.text) as typeof extracted
           extracted = rotatedExtraction
@@ -408,13 +458,17 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
       return
     }
     if (isModelUnavailableError(error)) {
-      const configuredModel = process.env.GEMINI_MODEL?.trim() || 'gemini-2.5-flash'
+      const configuredModel = process.env.GEMINI_MODEL?.trim() || 'gemini-3.5-flash-lite'
       console.error('Gemini model unavailable:', status, configuredModel, safeDiagnostic.slice(0, 1200))
-      response.status(502).json({ error: 'מודל Gemini שנבחר אינו זמין בפרויקט. בדקי את GEMINI_MODEL במשתני הסביבה של השרת (לדוגמה Render) והגדירי gemini-3.8-flash.' })
+      response.status(502).json({ error: 'מודל Gemini שנבחר אינו זמין בפרויקט. בדקי את GEMINI_MODEL במשתני הסביבה של השרת (לדוגמה Render) והגדירי gemini-3.5-flash-lite.' })
       return
     }
     if (status === 429) {
       response.status(429).json({ error: 'מכסת Gemini נוצלה או שקצב הבקשות גבוה מדי. בדקי מכסה וחיוב בפרויקט Google ונסי שוב מאוחר יותר.' })
+      return
+    }
+    if (status === 504) {
+      response.status(503).json({ error: 'שירות Gemini איטי כרגע והבקשה הופסקה כדי לא לחסום את התור. נסי שוב בעוד כדקה.' })
       return
     }
     console.error('Gemini extraction failed:', status, safeDiagnostic.slice(0, 1200))

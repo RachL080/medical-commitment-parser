@@ -209,6 +209,9 @@ function wait(milliseconds: number) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds))
 }
 
+const EXTRACTION_REQUEST_TIMEOUT_MS = 70_000
+const EXTRACTION_RETRIES = 1
+
 interface ExtractionApiResponse extends Partial<ExtractedForm> {
   uncertainFields?: FieldKey[]
   fieldReasons?: Array<{ fieldName: FieldKey; reason: string }>
@@ -221,16 +224,16 @@ async function extractPendingPage(task: QueuedPageTask, onRetry: (delaySeconds: 
     const pageBlob = await task.renderPage()
     let result: ExtractionApiResponse | undefined
     let response: Response | undefined
-    for (let attempt = 0; attempt <= 1; attempt += 1) {
+    for (let attempt = 0; attempt <= EXTRACTION_RETRIES; attempt += 1) {
       const requestData = new FormData()
       requestData.append('file', pageBlob, `${task.fileName}.page-${task.pageNumber}.jpg`)
-      response = await fetch('/api/extract', { method: 'POST', body: requestData, signal: AbortSignal.timeout(120_000) })
+      response = await fetch('/api/extract', { method: 'POST', body: requestData, signal: AbortSignal.timeout(EXTRACTION_REQUEST_TIMEOUT_MS) })
       const contentType = response.headers.get('content-type') ?? ''
       if (!contentType.includes('application/json')) {
         throw new Error(`שרת Render החזיר דף שגיאה במקום נתוני חילוץ (HTTP ${response.status}). ייתכן שהשרת התעורר או שהבקשה נקטעה. נסי שוב; אם זה חוזר, בדקי את Render Logs.`)
       }
       result = await response.json() as ExtractionApiResponse
-      if ((response.status !== 429 && response.status !== 503) || attempt === 1) break
+      if ((response.status !== 429 && response.status !== 503) || attempt === EXTRACTION_RETRIES) break
       const delaySeconds = 1
       onRetry(delaySeconds, attempt + 1)
       await wait(delaySeconds * 1000)
@@ -279,8 +282,10 @@ async function extractPendingPage(task: QueuedPageTask, onRetry: (delaySeconds: 
     await completeExtraction(task.formId, data, flags)
     return null
   } catch (error) {
-    const message = error instanceof DOMException && error.name === 'TimeoutError'
-      ? 'החילוץ נמשך זמן רב מדי. העלי שוב את הקובץ כדי לחדש.'
+    const isTimeoutError = (error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError'))
+      || (error instanceof Error && /timed\s*out|timeout|aborted/u.test(error.message.toLowerCase()))
+    const message = isTimeoutError
+      ? 'שירות Gemini איטי כרגע. אפשר להעלות שוב מיד, או להמתין דקה ולנסות שוב.'
       : error instanceof Error ? error.message : 'החילוץ נכשל'
     await failExtraction(task.formId, message)
     return message
@@ -346,7 +351,7 @@ function App() {
     setActiveFormId(task.formId)
     setProcessingIds([task.formId])
     void extractPendingPage(task, (delaySeconds, attempt) => {
-      setNotice(`Gemini עמוס. מנסה שוב את ${task.fileName}, עמוד ${task.pageNumber} בעוד ${delaySeconds} שניות (${attempt}/3).`)
+      setNotice(`Gemini עמוס. מנסה שוב את ${task.fileName}, עמוד ${task.pageNumber} בעוד ${delaySeconds} שניות (${attempt}/${EXTRACTION_RETRIES + 1}).`)
     }).then((error) => {
       if (error) setNotice(`החילוץ נכשל עבור ${task.fileName}, עמוד ${task.pageNumber}: ${error}. אפשר למלא ידנית או להעלות שוב.`)
     }).finally(() => {
