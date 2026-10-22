@@ -138,22 +138,9 @@ function isModelUnavailableError(error: unknown) {
   return /model|unsupported|unavailable|not\s+found|not\s+supported|unknown/u.test(message)
 }
 
-function extractionScore(result: Record<string, unknown>) {
-  const scalarFields = ['firstName', 'lastName', 'idNumber', 'sampleReceivedDate', 'referringOrganization']
-  const arrayFields = ['centralNumbers', 'commitmentNumbers']
-  const extractedCount = scalarFields.filter((field) => typeof result[field] === 'string' && result[field].trim().length > 0).length
-    + arrayFields.filter((field) => Array.isArray(result[field]) && result[field].length > 0).length
-  const uncertainCount = Array.isArray(result.uncertainFields) ? result.uncertainFields.length : scalarFields.length + arrayFields.length
-  return extractedCount - uncertainCount
-}
-
 function needsOrientationRetry(result: Record<string, unknown>) {
   const orientation = Number(result.orientationDegrees)
-  if ([90, 180, 270].includes(orientation)) return true
-  const requiredValues = ['firstName', 'lastName', 'idNumber', 'sampleReceivedDate']
-  const missingRequired = requiredValues.filter((field) => typeof result[field] !== 'string' || result[field].trim().length === 0).length
-  const uncertainCount = Array.isArray(result.uncertainFields) ? result.uncertainFields.length : requiredValues.length
-  return missingRequired >= 3 && uncertainCount >= 4
+  return [90, 180, 270].includes(orientation)
 }
 
 const responseSchema = {
@@ -326,12 +313,11 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
     if (uploadedFile.mimetype !== 'application/pdf' && needsOrientationRetry(extracted)) {
       try {
         const detectedOrientation = Number(extracted.orientationDegrees)
-        const orientations = [90, 180, 270].includes(detectedOrientation) ? [detectedOrientation] : [90, 180, 270]
-        const rotatedCandidates = await createImageCandidates(orientations)
+        const rotatedCandidates = await createImageCandidates([detectedOrientation])
         const rotatedResult = await runExtraction(rotatedCandidates)
         if (rotatedResult.text) {
           const rotatedExtraction = JSON.parse(rotatedResult.text) as typeof extracted
-          if (extractionScore(rotatedExtraction) > extractionScore(extracted)) extracted = rotatedExtraction
+          extracted = rotatedExtraction
         }
       } catch (error) {
         console.warn('Gemini orientation retry failed; keeping first extraction:', getGeminiErrorStatus(error), getGeminiErrorMessage(error).slice(0, 400))
