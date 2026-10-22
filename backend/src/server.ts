@@ -138,6 +138,22 @@ function isModelUnavailableError(error: unknown) {
   return /model|unsupported|unavailable|not\s+found|not\s+supported|unknown/u.test(message)
 }
 
+function extractionScore(result: Record<string, unknown>) {
+  const scalarFields = ['firstName', 'lastName', 'idNumber', 'sampleReceivedDate', 'referringOrganization']
+  const arrayFields = ['centralNumbers', 'commitmentNumbers']
+  const extractedCount = scalarFields.filter((field) => typeof result[field] === 'string' && result[field].trim().length > 0).length
+    + arrayFields.filter((field) => Array.isArray(result[field]) && result[field].length > 0).length
+  const uncertainCount = Array.isArray(result.uncertainFields) ? result.uncertainFields.length : scalarFields.length + arrayFields.length
+  return extractedCount - uncertainCount
+}
+
+function needsOrientationRetry(result: Record<string, unknown>) {
+  const requiredValues = ['firstName', 'lastName', 'idNumber', 'sampleReceivedDate']
+  const missingRequired = requiredValues.filter((field) => typeof result[field] !== 'string' || result[field].trim().length === 0).length
+  const uncertainCount = Array.isArray(result.uncertainFields) ? result.uncertainFields.length : requiredValues.length
+  return missingRequired >= 2 || uncertainCount >= 4
+}
+
 const responseSchema = {
   type: Type.OBJECT,
   properties: {
@@ -226,22 +242,27 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
   }
 
   try {
+    const createImageCandidates = (degreesToTry: number[]) => Promise.all(degreesToTry.map(async (degrees) => {
+      const rotated = await sharp(uploadedFile.buffer, { failOn: 'none' })
+        .rotate(degrees)
+        .resize({ width: 1800, height: 1800, fit: 'inside', withoutEnlargement: true })
+        .jpeg({ quality: 82 })
+        .toBuffer()
+      return { degrees, inlineData: { mimeType: 'image/jpeg', data: rotated.toString('base64') } }
+    }))
     const candidates = uploadedFile.mimetype === 'application/pdf'
       ? [{ degrees: 0, inlineData: { mimeType: uploadedFile.mimetype, data: uploadedFile.buffer.toString('base64') } }]
-      : await Promise.all([0, 90, 180, 270].map(async (degrees) => {
-        const rotated = await sharp(uploadedFile.buffer, { failOn: 'none' }).rotate(degrees).png().toBuffer()
-        return { degrees, inlineData: { mimeType: 'image/png', data: rotated.toString('base64') } }
-      }))
+      : await createImageCandidates([0])
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
     const configuredModel = process.env.GEMINI_MODEL?.trim()
     const primaryModel = configuredModel || 'gemini-3.8-flash'
     const fallbackModel = 'gemini-3.8-flash'
-    const generateExtraction = (model: string) => ai.models.generateContent({
+    const generateExtraction = (model: string, imageCandidates: typeof candidates = candidates) => ai.models.generateContent({
       model,
       contents: [{
         role: 'user',
-        parts: candidates.flatMap((candidate) => [
-          ...(candidates.length > 1 ? [{ text: `Candidate orientation ${candidate.degrees} degrees clockwise.` }] : []),
+        parts: imageCandidates.flatMap((candidate) => [
+          ...(imageCandidates.length > 1 ? [{ text: `Candidate orientation ${candidate.degrees} degrees clockwise.` }] : []),
           { inlineData: candidate.inlineData },
         ]).concat([{
           text: [
@@ -266,16 +287,21 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
         temperature: 0,
       },
     })
-    const result = await generateExtraction(primaryModel).catch(async (error: unknown) => {
-      if (!isModelUnavailableError(error) || primaryModel === fallbackModel) throw error
-      return generateExtraction(fallbackModel)
-    })
+    const runExtraction = async (imageCandidates: typeof candidates) => {
+      try {
+        return await generateExtraction(primaryModel, imageCandidates)
+      } catch (error) {
+        if (!isModelUnavailableError(error) || primaryModel === fallbackModel) throw error
+        return generateExtraction(fallbackModel, imageCandidates)
+      }
+    }
+    let result = await runExtraction(candidates)
 
     if (!result.text) {
       response.status(502).json({ error: 'מודל החילוץ לא החזיר תוצאה.' })
       return
     }
-    const extracted = JSON.parse(result.text) as {
+    let extracted = JSON.parse(result.text) as {
       firstName?: string | null
       firstNameEvidence?: string
       lastName?: string | null
@@ -294,6 +320,18 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
       uncertainFields?: string[]
         fieldReasons?: Array<{ fieldName: string; reason: string }>
       [key: string]: unknown
+    }
+    if (uploadedFile.mimetype !== 'application/pdf' && needsOrientationRetry(extracted)) {
+      try {
+        const rotatedCandidates = await createImageCandidates([0, 90, 180, 270])
+        const rotatedResult = await runExtraction(rotatedCandidates)
+        if (rotatedResult.text) {
+          const rotatedExtraction = JSON.parse(rotatedResult.text) as typeof extracted
+          if (extractionScore(rotatedExtraction) > extractionScore(extracted)) extracted = rotatedExtraction
+        }
+      } catch (error) {
+        console.warn('Gemini orientation retry failed; keeping first extraction:', getGeminiErrorStatus(error), getGeminiErrorMessage(error).slice(0, 400))
+      }
     }
     for (const [nameKey, evidenceKey] of [['firstName', 'firstNameEvidence'], ['lastName', 'lastNameEvidence']] as const) {
       const name = extracted[nameKey]?.trim()
