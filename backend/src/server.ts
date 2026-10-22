@@ -176,6 +176,7 @@ const responseSchema = {
     idNumber: { type: Type.STRING, nullable: true },
     idNumberEvidence: { type: Type.STRING },
     centralNumbers: { type: Type.ARRAY, items: { type: Type.STRING } },
+    centralNumbersEvidence: { type: Type.STRING },
     sampleReceivedDate: { type: Type.STRING, nullable: true },
     sampleReceivedDateEvidence: { type: Type.STRING },
     referringOrganization: { type: Type.STRING, nullable: true },
@@ -208,7 +209,7 @@ const responseSchema = {
     },
     orientationDegrees: { type: Type.STRING, enum: ['0', '90', '180', '270'] },
   },
-  required: ['firstName', 'firstNameEvidence', 'lastName', 'lastNameEvidence', 'idNumber', 'idNumberEvidence', 'centralNumbers', 'sampleReceivedDate', 'sampleReceivedDateEvidence', 'referringOrganization', 'referringOrganizationEvidence', 'referringOrganizationObservedText', 'referringOrganizationContext', 'referringOrganizationLogoText', 'referringOrganizationCandidate', 'commitmentNumbers', 'uncertainFields', 'fieldReasons', 'orientationDegrees'],
+  required: ['firstName', 'firstNameEvidence', 'lastName', 'lastNameEvidence', 'idNumber', 'idNumberEvidence', 'centralNumbers', 'centralNumbersEvidence', 'sampleReceivedDate', 'sampleReceivedDateEvidence', 'referringOrganization', 'referringOrganizationEvidence', 'referringOrganizationObservedText', 'referringOrganizationContext', 'referringOrganizationLogoText', 'referringOrganizationCandidate', 'commitmentNumbers', 'uncertainFields', 'fieldReasons', 'orientationDegrees'],
 }
 
 app.get('/api/health', (_request, response) => response.json({ ok: true, geminiConfigured: Boolean(process.env.GEMINI_API_KEY) }))
@@ -292,15 +293,15 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
           ]).concat([{
             text: [
               'Extract the form fields from the document image and return only the required JSON schema.',
-              'CRITICAL NAME RULE: Do not invent, infer, autocomplete, or use common names. If a name is partly legible, return only the literal candidate you can read and mark that field uncertain with evidence/reason. Return null only when no candidate letters are legible.',
+              'CRITICAL NAME RULE: Read a name only from text next to a name label such as שם, שם פרטי, שם משפחה, שם מלא, or שם ופרטי. Names must contain no digits. Never copy an ID, central, commitment, phone, or other number into a name field. Do not invent, infer, autocomplete, or use common names. If a labeled name is partly legible, return only the literal candidate you can read and mark it uncertain with evidence/reason. Return null if the name label/value is absent or no candidate letters are legible.',
               'For every non-null firstName, firstNameEvidence must quote the exact visible letters/words that support it. For every non-null lastName, lastNameEvidence must quote the exact visible letters/words that support it.',
-              'If evidence does not contain the returned name, or handwriting is not legible enough to read exact letters, return null for that name and include its field key in uncertainFields.',
-              'ID RULE: Copy the ID number exactly from a field explicitly labeled תעודת זהות or מספר זהות. Never use a commitment number, referral number, phone number, or another digit sequence. Return idNumberEvidence as the exact label and digits. If some digits are visible but uncertain, return the literal candidate and mark idNumber uncertain; return null only when no ID digits are legible.',
+              'If evidence does not contain the returned name, the name contains any digit, or handwriting is not legible enough to read exact letters, return null for that name and include its field key in uncertainFields.',
+              'ID RULE: Read an ID number only next to an explicit identity label: ת.ז, ת״ז, תעודת זהות, or מספר זהות. Never use a commitment number, referral number, phone number, or another digit sequence. Return idNumberEvidence quoting the identity label and exact digits. If some digits are visible but uncertain, return the literal candidate and mark idNumber uncertain; return null only when no ID digits are legible.',
               'DATE RULE: Read sampleReceivedDate only from the date stamped with התקבל or נתקבל on the form. Do not use a typed/printed form date, referral date, issue date, or today, even if another date is clearly printed. Return sampleReceivedDateEvidence containing the exact stamp wording (התקבל/נתקבל) and the stamped date. If some stamp digits are visible but uncertain, return the legible date candidate and mark sampleReceivedDate uncertain; return null only when no received-stamp date is legible.',
-              'CENTRAL NUMBERS RULE: Find and return every distinct central number (מספר מרכזי) shown on the form, including multiple numbers in the same field or repeated central-number entries. Return all of them in centralNumbers; do not return only the first. Exclude ID numbers, commitment numbers, phone numbers, and unrelated reference numbers. Mark centralNumbers uncertain if any candidate digits are ambiguous.',
-              'If there are separate first-name and family-name fields, read them independently. Only for one combined full-name field, use the last word as family name and preceding words as given name.',
+              'CENTRAL NUMBERS RULE: Inspect every sticker and field labeled מספר מרכזי, מספרים מרכזיים, or מרכזי. A document may contain more than one central number, including multiple stickers; return every distinct central number in centralNumbers, never only the first, and preserve each number exactly. centralNumbersEvidence must quote the מרכזי label/sticker wording that identifies these values. Exclude ID numbers, commitment numbers, phone numbers, and unrelated reference numbers. Mark centralNumbers uncertain if any candidate digits are ambiguous or the label/value association is unclear.',
+              'If there are separate labeled first-name and family-name fields, read them independently. Only when there is one combined full-name field, use its last word as family name and preceding words as given name; never split an unlabeled text into names.',
               `REFERRING ORGANIZATION LIST (choose the canonical name before parentheses): ${organizationNames.map((name) => `${name}${organizationAliases[name]?.length ? ` (brand aliases: ${organizationAliases[name].join(', ')})` : ''}`).join(' | ')}`,
-              'REFERRING ORGANIZATION RULE: Visually inspect every logo, emblem, and brand mark on the document, not only selectable/printed text. Transcribe the visible logo wording exactly into referringOrganizationLogoText. Match that wording against the provided organization list, including known short brand names/aliases, and return the exact list item as referringOrganizationCandidate. Select only one exact list item; otherwise return null. Do not choose an organization merely because its name appears elsewhere. Use labels and layout to determine which logo/name belongs to the referring organization, not the receiving lab/hospital. referringOrganizationContext must describe the position/label proving it is the sender/referrer (for example, insurer/member area or referring-clinic field). If sender versus receiver is unclear, return null and mark referringOrganization uncertain.',
+              'REFERRING ORGANIZATION RULE: Visually inspect the logo/emblem belonging to the referring organization, not the receiving lab/hospital. Transcribe its visible wording exactly into referringOrganizationLogoText, then compare that wording (including known short brand names/aliases) against the supplied organization list. Return the exact matching list item as referringOrganizationCandidate; return null if the logo cannot be matched to exactly one list item. Do not identify the organization from unrelated printed text or from a logo belonging to the receiving institution. referringOrganizationContext must describe the layout/label showing that this logo belongs to the sender/referrer. If the sender logo or its role is unclear, return null and mark referringOrganization uncertain.',
               'If a field is absent or has no legible candidate, return null. If a candidate is visible but confidence is low, return the literal candidate, include the field in uncertainFields, and explain why. Never guess characters or values.',
               'For each field key in uncertainFields, add a fieldReasons entry with a concise, specific reason based on the image (for example, label missing, handwriting illegible, digits ambiguous, or value not present). Do not include personal values in reasons.',
             ].join(' '),
@@ -347,6 +348,8 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
       lastNameEvidence?: string
       idNumber?: string | null
       idNumberEvidence?: string
+      centralNumbers?: string[]
+      centralNumbersEvidence?: string
       sampleReceivedDate?: string | null
       sampleReceivedDateEvidence?: string
       referringOrganization?: string | null
@@ -373,22 +376,30 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
         console.warn('Gemini orientation retry failed; keeping first extraction:', getGeminiErrorStatus(error), getGeminiErrorMessage(error).slice(0, 400))
       }
     }
+    const uncertainFields = new Set(extracted.uncertainFields ?? [])
     for (const [nameKey, evidenceKey] of [['firstName', 'firstNameEvidence'], ['lastName', 'lastNameEvidence']] as const) {
       const name = extracted[nameKey]?.trim()
       const evidence = extracted[evidenceKey]?.trim() ?? ''
       const normalizedName = name?.replace(/\s+/gu, ' ').toLocaleLowerCase('he')
       const normalizedEvidence = evidence.replace(/\s+/gu, ' ').toLocaleLowerCase('he')
-      if (name && (!normalizedEvidence || !normalizedEvidence.includes(normalizedName!))) {
-        extracted.uncertainFields = [...new Set([...(extracted.uncertainFields ?? []), nameKey])]
+      if (name && /\p{N}/u.test(name)) {
+        extracted[nameKey] = null
+        uncertainFields.add(nameKey)
+      } else if (name && (!normalizedEvidence || !normalizedEvidence.includes(normalizedName!))) {
+        uncertainFields.add(nameKey)
       } else if (!name) {
-        extracted.uncertainFields = [...new Set([...(extracted.uncertainFields ?? []), nameKey])]
+        uncertainFields.add(nameKey)
       }
     }
-    const uncertainFields = new Set(extracted.uncertainFields ?? [])
+    extracted.centralNumbers = [...new Set(extracted.centralNumbers ?? [])]
+    if (extracted.centralNumbers.length > 0 && !/מרכזי/iu.test(extracted.centralNumbersEvidence ?? '')) {
+      uncertainFields.add('centralNumbers')
+    }
     if (extracted.idNumber) {
       const evidenceDigits = normalizeDigits(extracted.idNumberEvidence ?? '')
       const idDigits = normalizeDigits(extracted.idNumber)
-      if (!isValidIsraeliId(idDigits) || evidenceDigits !== idDigits) {
+      const hasIdentityLabel = /(?:ת\s*[.״"׳']?\s*ז|תעודת\s+זהות|מספר\s+זהות)/iu.test(extracted.idNumberEvidence ?? '')
+      if (!isValidIsraeliId(idDigits) || evidenceDigits !== idDigits || !hasIdentityLabel) {
         uncertainFields.add('idNumber')
       }
     } else {
@@ -416,8 +427,11 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
     extracted.orientationDegrees = [0, 90, 180, 270].includes(parsedOrientation) ? parsedOrientation : 0
     const organizationContext = extracted.referringOrganizationContext ?? ''
     const hasReferrerContext = /ארגון\s+מפנה|גורם\s+מפנה|מוסד\s+מפנה|קופת\s+החולים\s+המפנה|מבוטח\s+ב|קופה|נשלח\s+מאת|נשלח\s+על\s+ידי|שם\s+המבוטח|פרטי\s+המבוטח|לוגו|סמל|referr|sender|member|logo/iu.test(organizationContext)
+    const logoMatchedOrganization = matchKnownOrganization(logoOrganizationText)
     const matchedOrganization = hasReferrerContext
-      ? candidateOrganization ?? matchKnownOrganization(`${observedOrganizationText} ${logoOrganizationText}`)
+      ? logoMatchedOrganization && (!candidateOrganization || candidateOrganization === logoMatchedOrganization)
+        ? logoMatchedOrganization
+        : null
       : null
 
     if (!matchedOrganization) {
@@ -433,6 +447,7 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
     const reasonByField = new Map((extracted.fieldReasons ?? []).map(({ fieldName, reason }) => [fieldName, reason]))
     const fallbackReasons: Record<string, string> = {
       idNumber: 'מספר הזהות חסר, לא קריא או לא עבר אימות ספרת ביקורת.',
+      centralNumbers: 'לא נמצאה ראיה ברורה שמספרי המרכזי מופיעים על מדבקת מרכזי.',
       sampleReceivedDate: 'תאריך הקבלה חסר, לא קריא או לא תאם לראיה במסמך.',
       referringOrganization: 'לא נמצאה התאמה ודאית בין שם הארגון לבין גורם מפנה במסמך.',
     }
