@@ -380,6 +380,8 @@ app.post('/api/extract', upload.single('file'), async (request, response) => {
       return
     }
     if (isModelUnavailableError(error)) {
+      const configuredModel = process.env.GEMINI_MODEL?.trim() || 'gemini-2.5-flash'
+      console.error('Gemini model unavailable:', status, configuredModel, safeDiagnostic.slice(0, 1200))
       response.status(502).json({ error: 'מודל Gemini שנבחר אינו זמין בפרויקט. בדקי את GEMINI_MODEL במשתני הסביבה של השרת (לדוגמה Render) והגדירי gemini-2.5-flash.' })
       return
     }
